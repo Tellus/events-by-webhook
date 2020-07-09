@@ -1,0 +1,44 @@
+{
+  "name": "@specialminds/events-by-webhook",
+  "version": "0.0.1",
+  "description": "A small library to emit and consume events over web endpoints. Wraps Koajs, Axios and Node's EventEmitter.",
+  "main": " ",
+  "scripts": {
+    "test": "ts-mocha"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tellus/events-by-webhook.git"
+  },
+  "keywords": [
+    "eventemitter",
+    "events",
+    "event",
+    "webhook"
+  ],
+  "author": "Johannes L. Borresen <jlb@specialminds.dk>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Tellus/events-by-webhook/issues"
+  },
+  "homepage": "https://github.com/Tellus/events-by-webhook#readme",
+  "dependencies": {
+    "@koa/router": "^9.3.1",
+    "http-status-codes": "^1.4.0",
+    "koa": "^2.13.0",
+    "koa-bodyparser": "^4.3.0",
+    "koa-jwt": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/chai": "^4.2.11",
+    "@types/koa": "^2.11.3",
+    "@types/koa-bodyparser": "^4.3.0",
+    "@types/koa__router": "^8.0.2",
+    "@types/mocha": "^7.0.2",
+    "@types/node": "^14.0.20",
+    "chai": "^4.2.0",
+    "mocha": "^8.0.1",
+    "ts-mocha": "^7.0.0",
+    "typescript": "^3.9.6"
+  }
+}
