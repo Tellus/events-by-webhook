@@ -1,4 +1,4 @@
-# events-by-webhook
+# WHEE (WebHook EventEmitter)
 
 ## Introduction
 
@@ -7,6 +7,8 @@ A small library to emit and receive events through webhooks (i.e. endpoints on a
 This library is **by no means** meant to replace or compete with solid message passing and distribution frameworks. If you need large-scale and highly robust solution I recommend alternatives such as RabbitMQ or Kafka.
 
 Instead, this library is intended to work in small self-contained solutions, where you'd rather not set up an entirely different system for the purposes of passing event messages back and forth between related processes, but in-process event handling isn't possible. There is no error handling or crash recovery, although it should be easy to integrate if you need it.
+
+The initial implementation does NOT have anything nifty like error correction, topology reconstruction, zeroconf, or distributed event propagation. Let's leave that for a full v1 or v2 release.
 
 ## Installation
 
@@ -35,7 +37,7 @@ emitter.listen();
 
 emitter.on('some_event', () => console.debug('Some event happened!'));
 
-emitter.emit('an_event_from_central');
+setInterval(() => emitter.emit('an_event_from_central'), 3000);
 
 ```
 
@@ -56,7 +58,7 @@ emitter.listen();
 emitter.on('an_event_from_central', () => console.debug('CENTRAL sent an event.'));
 
 // Send a 'some_event' event to CENTRAL. It will be propagated to any others.
-emitter.emit('some_event');
+setInterval(() => emitter.emit('some_event'), 3000);
 
 ```
 
@@ -75,17 +77,15 @@ emitter.on('some_event', () => console.debug('LEAF2 saw some event!'));
 
 ```
 
-CENTRAL and LEAF2 should print
+CENTRAL and LEAF2 should repeatedly print
 ```
 Some event happened!
 ```
 
-while LEAF should print
+while LEAF should repeatedly print
 ```
 CENTRAL sent an event.
 ```
-
-*Note: due to the unreliable timing of process execution and data transmission, the order of events may be wrong or an event might not be "seen" because the listener wasn't registered before the emission. The code examples show the PRINCIPLE of setting up the system, not a solid working example :-)*
 
 ### Replacing EventEmitter.
 
@@ -102,3 +102,19 @@ Note that there is *no* functional difference between a null-configured `WebEven
 ## Typescript
 
 The library comes with its own Typescript definitions (heck, it's **written** in Typescript!), so you won't need any from DefinitelyTyped.
+
+## Wishlist
+
+Stuff we'd like to add down the road:
+
+#### Self-healing topology
+
+The network's design relies on one or more central servers relaying information throughout the network. What happens if central servers disappear?
+
+#### ZeroConf
+
+It's impossible to set up ZeroConf on solutions running on the internet, but for LAN setups, using libs for it.
+
+#### Distributed event propagation
+
+Having central nodes propagate all events is a clear bottleneck. If the propagation task is distributed evenly throughout, propagation capacity increases markedly.

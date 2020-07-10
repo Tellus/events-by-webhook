@@ -1,0 +1,15 @@
+@startuml Propagation flow
+
+participant "Local Code" as local
+participant "WebEventEmitter\n(Local)" as emitter
+participant "WebEventEmitter\n(Central)" as central
+participant "WebEventEmitter2..N" as others
+participant "Remote Code" as remote
+
+local -> emitter : Local emit is called.
+emitter -> local : Propagates event locally.
+emitter -> central : Sends event to central.
+central -> others : Propagates to rest of network.
+others -> remote : Local emission(s) of event.
+
+@enduml

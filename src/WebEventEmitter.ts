@@ -1,11 +1,15 @@
 'use strict';
 
-import { EventEmitter, EventEmitterOptions } from 'events';
+import { EventEmitter } from 'events';
+import _ from 'lodash';
+
 import { URL } from 'url';
 import { Server } from 'http'; // https.Server basically uses http.Server.
 import bodyparser from 'koa-bodyparser';
 import Application from 'koa';
 import Router from '@koa/router';
+import koaJwt from 'koa-jwt';
+import axios from 'axios';
 
 /**
  * Options specific to running a WebEventEmitter that listens for incoming
@@ -48,97 +52,209 @@ export interface IWebEventEmitterOptions {
    * Defaults to 8080.
    */
   port?: number;
+
+  captureRejections?: boolean;
+
+  /**
+   * Time in seconds between each network health check. Each time, the emitter
+   * will query 
+   */
+  keepaliveInterval?: Number;
 }
 
 /**
- * 
- * @param length Length of string to generate.
- * @param chars Valid characters. Defaults to all alphanumeric, [a-zA-Z0-9].
+ * Returns true if the passed object is a Plain Old Javascript Object, fit for
+ * transmission over the network.
+ * @param obj Object to test.
  */
-function randomString(length: number, chars: string): string {
-  return '';
+function isPOJO(obj:any):boolean {
+  return _.valuesIn(obj).every((value) => typeof value != 'function' && !(value instanceof Function));
 }
 
-type OuterFunction = Function & { listener: (... args:any[]) => void };
+/**
+ * If value seems to be a Symbol (i.e. "Symbol(someWord)"), function will return
+ * a proper Symbol. Otherwise, the value is returned as-is.
+ * @param value The string to parse.
+ */
+function stringToSymbolOrString(value:string): string | symbol {
+  if (value.startsWith('Symbol(') && value.endsWith(')')) {
+    // Assume proper symbol. Coerce.
+    return Symbol(value.slice(7, value.length - 1));
+  } else return value;
+}
 
 /**
  * Extension of the regular EventEmitter that acts either as an end node or
  * central mediator for a small network of WebEventEmitter instances.
  * Listens for incoming web requests on a network port, emitting them to any
- * local listeners. Doubles as a regular EventEmitter, so any local calls to
- * 
- * Implementation detail:
- * The *CURRENT* implementation adds an additional event listener for each
- * 
- * The *OLD* implementation wraps event listeners in
- * a function that will handle the web portion and then invoke the listener.
- * This allows us to rely on most of the default EventEmitter implementation.
- * The alternative would have us register an extra, separate event handler,
- * which had to be filtered out in many queries.
+ * local listeners.
  */
 export class WebEventEmitter extends EventEmitter {
   private koaApplication:Application;
-  private koaServer:Server;
+  private koaServer?:Server;
 
-  private internalEventListenerName:string = "blaargh!";
+  private $http = axios;
 
-  constructor(private options ?: IWebEventEmitterOptions & EventEmitterOptions) {
-    super(<Pick<IWebEventEmitterOptions,EventEmitterOptions>> options);
+  private keepaliveTimer:ReturnType<typeof setInterval>;
 
-    this.koaApplication = new Application();
-    this.koaServer = this.koaApplication.listen(this?.options?.port, this?.options?.host);
+/**
+ * Sets up a new WebEventEmitter, optionally configured to accept or propagate
+ * events through a webserver endpoint.
+ * @param options 
+ */
+  constructor(private options ?: IWebEventEmitterOptions) {
+    super(options);
+
+    this.koaApplication = this.createListenerApplication();
+    
+    this.$http.defaults = {
+      baseURL: options.centralServer
+    }
+
+    this.keepaliveTimer = setInterval(() => console.debug('Checking network health.'), options.keepaliveInterval);
   }
 
-  async close():Promise<void> {
-    this.koaServer.close();
-  }
+  /**
+   * Starts listening for incoming events from other WebEventEmitters. If this
+   * emitter was configured as a propagator, it will retransmit incoming events.
+   * Otherwise, it will simply re-emit incoming events locally.
+   * @param port Optionally set a port to listen to. If unset, uses what was set
+   * during initialization.
+   * @param host Optionally set the host to bind to. If unset, uses what was set
+   * during initialization.
+   */
+  async listen(port ?: number, host ?: string): Promise<this> {
+    this.koaServer = this.koaApplication.listen(
+      port ? port : this?.options?.port,
+      host ? host : this?.options?.host
+    );
 
-  setMaxListeners(n: number): this {
-    super.setMaxListeners(n * 2);
     return this;
   }
 
+  /**
+   * Closes the webserver, halting its listening and freeing up the port. Make
+   * sure to call this before the rest of your code finishes, otherwise the
+   * node process will "lock" and the server keeps listening.
+   */
+  async close():Promise<void> {
+    this.koaServer?.close();
+  }
+
+  /**
+   * Implementation detail: EventEmitter.addListener doesn't dynamically bind to
+   * WebEventEmitter.on, so we have to make this override.
+   */
   addListener(event: string | symbol, listener: (... args: any[]) => void): this {
-    // EventEmitter.addListener doesn't dynamically bind to WebEventEmitter.on,
-    // so we have to make this override.
     return this.on(event, listener);
   }
 
+  /**
+   * 
+   * @param event The event to trigger.
+   * @param args Arguments to pass to listeners. NOTE! While local (in-process)
+   * listeners can work with any sort of reference it is passed, remote
+   * listeners can't. To avoid problems, only use POJOs as arguments - pure
+   * data, all the way down. 
+   */
   emit(event: string | symbol, ... args: any[]): boolean {
-    const hadListeners:boolean = super.emit(event, ... args);
+    if (!isPOJO({ ... args }))
+      throw new Error('Some of the event data can not be serialized. Propagation halted.');
 
-    if (hadListeners) {
-      // TODO: Do *we* delegate to web portion or is that handled by secondary event listener?
-      // CURRENTLY handled by secondary event listener.
+    // Store the local emit result, so we can inform the propagated targets of
+    // local event propagation.
+    let hadListeners = super.emit(event, ... args);
+
+    try {
+      console.debug(`Propagating event...`);
+      const asJson = JSON.stringify(args);
+    } catch (err) {
+      console.error(`Failed to stringify event payload: ${err}`);
+
+      // OR the current result of hadListeners with the result of propagating
+      // the event, to indicate "any listeners at all"
+      hadListeners = hadListeners || await this.propagateEvent(event, args);
     }
-
+    
     return hadListeners;
   }
 
-  listeners(event: string | symbol): Function[] {
-    const listeners:OuterFunction[] = super.listeners(event) as OuterFunction[];
-
-    const actualListeners:Array<Function> = [];
-
-    listeners.forEach((v) => {
-      console.debug('Pushing internal listener from external.');
-      console.debug(`EXTERNAL:${v.toString()}`);
-      console.debug(`INTERNAL:${v.listener.toString()}`);
-      actualListeners.push(v.listener);
+  /**
+   * 
+   * @param event The event to propagate. If a symbol, will be co-erced to a
+   * string before transmission.
+   * @param args Event arguments.
+   */
+  async private propagateEvent(event: string | symbol, ...args: any[]):Promise<boolean> {
+    const result = await this.$http.post(`/${event.toString()}`, {
+      ... args
     });
 
-    return actualListeners;
+    return result.data.hadListeners;
   }
 
-  private createEventHandler(event: string | symbol, listener: (...args: any[]) => void): (... args: any[]) => void {
-    const fn = (... args: any[]) => {
-      console.debug(`Event ${event.toString()} happened. Send via the net! Also calling!`);
-      fn.listener(... args);
-    };
-    console.debug(`Adding this function to fn.listener: ${listener.toString()}`);
-    fn.listener = listener;
-    console.debug(`ADDED this function to fn.listener: ${listener.toString()}`);
+  // Called internally when receiving events via the endpoint. 
+  private onWebEmit(eventName: string, ... args: any[]):boolean {
+    // Local event emission.
+    return super.emit(stringToSymbolOrString(eventName), args);
+  }
 
-    return fn;
+  /**
+   * Returns an array listing the events for which the emitter has registered
+   * listeners. The values in the array will be strings or Symbols.
+   * This function differs from the normal EventEmitter, as it will also return
+   * the event names with listeners from other emitters in the network.
+   */
+  eventNames(): Array<string | symbol> {
+    const localEventNames = super.eventNames();
+
+    // Collect event names from central server.
+    const result = await this.$http.get('/event-names');
+
+    return localEventNames.concat(result.data.eventNames);
+  }
+
+  private createListenerApplication():Application {
+    const app = new Application();
+
+    // IF a secret has been set, add an auth middleware.
+    if (this.options.secret) {
+      app.use(koaJwt({
+        secret: this.options.secret,
+      }));  
+    }
+    
+    // For parsing POST bodies.
+    app.use(bodyparser({
+
+    }));
+
+    // The actual router. The event emitter has its basic event notification
+    // endpoint, but also a status route that contains current health data, as
+    // well as an info route to query known event names and listeners from the
+    // network.
+    const router:Router = new Router({
+
+    });
+
+    router.post('/:eventName', (ctx) => {
+      if (this.emit)
+    });
+
+    router.get('/status', (ctx) => {
+
+    });
+
+    router.get('/event-names', (ctx) => {
+      ctx.body = {
+        status: 'OK',
+        eventNames: this.localEventNames(),
+      }
+    })
+
+    app.use(router.routes());
+    app.use(router.allowedMethods());
+
+    return app;
   }
 }
