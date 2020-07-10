@@ -11,55 +11,126 @@ import Router from '@koa/router';
 import koaJwt from 'koa-jwt';
 import axios from 'axios';
 
-/**
- * Options specific to running a WebEventEmitter that listens for incoming
- * events on a port.
- */
-export interface IServerOptions {
-
-}
+import * as statusCodes from 'http-status-codes';
+import { AddressInfo } from 'net';
 
 /**
- * Options specific to running 
+ * Options specific to the web portions of the emitter, including listening
+ * ports and route prefixes.
  */
-export interface IRemoteOptions {
+export interface IHttpOptions {
   /**
-   * Full URL (including port) to a WebEventEmitter endpoint.
+   * Network port to listen on.
    */
-  endpoint: string;
-
+  port?: number;
+  
   /**
-   * If set, will be used to authenticate against 
-   */
-  secret?: string;
-}
-
-export interface IWebEventEmitterOptions {
-  /**
-   * If set, is used as the fully-qualified endpoint for this emitter. Path
-   * prefixes and similar are pulled from this.
-   */
-  baseUrl?: URL;
-
-  /**
-   * If set, is used as host for the listener, passed directly to koa.
-   * Defaults to 'localhost'.
+   * If set, will listen on the address or host specified. Defaults to
+   * 'localhost'.
    */
   host?: string;
 
   /**
-   * If set, this is the port that the web server will listen on, passed to koa.
-   * Defaults to 8080.
+   * If set, must be the fully qualified URL for this emitters endpoint. This is
+   * transmitted to other emitters so they can transmit events to this emitter.
    */
-  port?: number;
+  baseUrl?: string;
+}
 
+export interface IWebEventEmitterOptions {
+  /**
+   * If set, will be used as JWT secret to restrict access to the emitter
+   * network.
+   */
+  secret?: string;
+
+  /**
+   * Fully qualified URL to another WebEventEmitter that can connect this
+   * emitter to the rest of the network.
+   * If unset, WebEventEmitter will act exactly like a regular EventEmitter.
+   */
+  connectTo?: string;
+
+  /**
+   * 
+   */
   captureRejections?: boolean;
 
   /**
    * Time in seconds between each network health check. Each time, the emitter
    * will query 
    */
-  keepaliveInterval?: Number;
+  keepaliveInterval?: number;
+
+  /**
+   * Options specific for the HttpServer portion of the emitter.
+   */
+  httpServer?: IHttpOptions;
+}
+
+/**
+ * Structure required when sending/receiving an event emit over the web.
+ */
+export interface IWebHookEvent {
+  /**
+   * Name of the event, regardless of whether it was originally a pure string or
+   * a symbol.
+   */
+  event: string;
+
+  /**
+   * If true, the event is considered a Symbol and the event is emitted with
+   * Symbol.for(event) rather than just the event's name.
+   */
+  symbol?: boolean;
+
+  /**
+   * The event arguments. Since this entire structure must be JSON-encoded,
+   * arguments can't contain functions or complex objects.
+   */
+  args: any;
+}
+
+type NodeStatus = 'STARTING' | 'RUNNING' | 'CLOSING' | 'ERROR';
+type NetworkStatus = 'HEALTHY' | 'DOWN' | 'PARTIAL';
+
+/**
+ * Structure required when responding to a /status GET request.
+ */
+export interface IStatusResponse {
+  /**
+   * Current status of the specific emitter that was contacted.
+   */
+  nodeStatus: NodeStatus;
+
+  /**
+   * Last known status of the entire network.
+   */
+  networkStatus: NetworkStatus;
+
+  /**
+   * Last known list of servers, including this one. This is generally updated
+   * on every change, or at each heartbeat at the latest.
+   */
+  servers: string[];
+
+  /**
+   * List of last known events with active listeners in the network. If you
+   * want to force a recheck of this list, call /event-names instead.
+   */
+  eventNames: Omit<IWebHookEvent, 'args'>[];
+}
+
+/**
+ * Attempts to discern whether obj is a proper IWebHookEvent.
+ * @param obj The object to test.
+ */
+export function isIWebHookEvent(obj:any): obj is IWebHookEvent {
+  const cons:IWebHookEvent = obj as IWebHookEvent;
+
+  return cons.event != undefined
+      && (cons.symbol == undefined || typeof cons.symbol == 'boolean')
+      && (cons.args == undefined || typeof cons.args == 'object');
 }
 
 /**
@@ -79,9 +150,23 @@ function isPOJO(obj:any):boolean {
 function stringToSymbolOrString(value:string): string | symbol {
   if (value.startsWith('Symbol(') && value.endsWith(')')) {
     // Assume proper symbol. Coerce.
-    return Symbol(value.slice(7, value.length - 1));
+    return Symbol.for(value.slice(7, value.length - 1));
   } else return value;
 }
+
+/**
+ * These are the "true" default options. We keep these around in case someone
+ * accidentally assigns a partial object to httpServer or other nested objects.
+ */
+const defaultEmitterOptions = {
+  captureRejections: false,
+  keepaliveInterval: 60 * 1000, // Heartbeat once a minute.
+  httpServer: {
+    port: 9192, // Default port.
+    host: 'localhost',
+    baseUrl: '',
+  },
+};
 
 /**
  * Extension of the regular EventEmitter that acts either as an end node or
@@ -93,25 +178,58 @@ export class WebEventEmitter extends EventEmitter {
   private koaApplication:Application;
   private koaServer?:Server;
 
+  /**
+   * Private reference to axios.
+   */
   private $http = axios;
 
+  /**
+   * Heartbeat interval. At every tick, the emitter checks the rest of the
+   * network for updates.
+   */
   private keepaliveTimer:ReturnType<typeof setInterval>;
+
+  readonly options: Readonly<IWebEventEmitterOptions>;
+
+  /**
+   * Default options used for the emitters. Changing these will only have an
+   * effect on any future initializations.
+   */
+  public static defaultOptions: IWebEventEmitterOptions = _.cloneDeep(defaultEmitterOptions);
 
 /**
  * Sets up a new WebEventEmitter, optionally configured to accept or propagate
  * events through a webserver endpoint.
  * @param options 
  */
-  constructor(private options ?: IWebEventEmitterOptions) {
-    super(options);
+  constructor(options ?: IWebEventEmitterOptions) {
+    super({ captureRejections: options?.captureRejections });
+
+    // Merge the passed options over the default options, yielding this
+    // instance's final options.
+    this.options = {
+      ... defaultEmitterOptions,
+      ... WebEventEmitter.defaultOptions,
+      ... options,
+      httpServer: {
+        ... defaultEmitterOptions.httpServer,
+        ... WebEventEmitter.defaultOptions.httpServer,
+        ... options?.httpServer,
+      },
+    };
 
     this.koaApplication = this.createListenerApplication();
     
-    this.$http.defaults = {
-      baseURL: options.centralServer
+    if (this.options.connectTo) {
+      this.$http.defaults = {
+        baseURL: options?.connectTo
+      }
+    } else {
+      // Warning! We're NOT connected anywhere!
     }
 
-    this.keepaliveTimer = setInterval(() => console.debug('Checking network health.'), options.keepaliveInterval);
+    // TODO: Is there a way to do this assignment without casting to "any" first?
+    this.keepaliveTimer = <any>setInterval(() => console.debug('Checking network health.'), this.options.keepaliveInterval);
   }
 
   /**
@@ -123,10 +241,10 @@ export class WebEventEmitter extends EventEmitter {
    * @param host Optionally set the host to bind to. If unset, uses what was set
    * during initialization.
    */
-  async listen(port ?: number, host ?: string): Promise<this> {
+  listen(): this {
     this.koaServer = this.koaApplication.listen(
-      port ? port : this?.options?.port,
-      host ? host : this?.options?.host
+      this.options.httpServer?.port,
+      this.options.httpServer?.host
     );
 
     return this;
@@ -142,11 +260,14 @@ export class WebEventEmitter extends EventEmitter {
   }
 
   /**
-   * Implementation detail: EventEmitter.addListener doesn't dynamically bind to
-   * WebEventEmitter.on, so we have to make this override.
+   * Closes/releases the resources taken up by this WebEventEmitter. Notably,
+   * this closes the HttpServer if it is running, and clears the various timers.
+   * Make sure to call this before your code ends, or the process may end up
+   * "hanging".
    */
-  addListener(event: string | symbol, listener: (... args: any[]) => void): this {
-    return this.on(event, listener);
+  async dispose():Promise<void> {
+    clearTimeout(this.keepaliveTimer);
+    await this.koaServer?.close();
   }
 
   /**
@@ -173,7 +294,8 @@ export class WebEventEmitter extends EventEmitter {
 
       // OR the current result of hadListeners with the result of propagating
       // the event, to indicate "any listeners at all"
-      hadListeners = hadListeners || await this.propagateEvent(event, args);
+      throw new Error('Proper propagation not yet implemented (cannot await).');
+      //hadListeners = hadListeners || await this.propagateEvent(event, args);
     }
     
     return hadListeners;
@@ -185,7 +307,7 @@ export class WebEventEmitter extends EventEmitter {
    * string before transmission.
    * @param args Event arguments.
    */
-  async private propagateEvent(event: string | symbol, ...args: any[]):Promise<boolean> {
+  private async propagateEvent(event: string | symbol, ...args: any[]):Promise<boolean> {
     const result = await this.$http.post(`/${event.toString()}`, {
       ... args
     });
@@ -209,9 +331,41 @@ export class WebEventEmitter extends EventEmitter {
     const localEventNames = super.eventNames();
 
     // Collect event names from central server.
-    const result = await this.$http.get('/event-names');
+    throw new Error('Not yet implemented. Cannot await HTTP request.');
+    //const result = await this.$http.get('/event-names');
 
-    return localEventNames.concat(result.data.eventNames);
+    // return localEventNames.concat(result.data.eventNames);
+  }
+
+  async serverStatus():Promise<NodeStatus> {
+    // TODO: Implement an actual health check.
+    return 'RUNNING';
+  }
+
+  async networkStatus():Promise<NetworkStatus> {
+    // TODO: Implement an actual health check.
+    return 'HEALTHY';
+  }
+
+  /**
+   * Retrieves the server's address, as returned by HttpServer.address.
+   * TODO: Is this the value we're looking for, really?
+   * TODO: Can we simplify the return type? Like ReturnType<Server.address>
+   */
+  address(): string | AddressInfo | null | undefined {
+    return this.koaServer?.address();
+  }
+
+  async serverList():Promise<string[]> {
+    const thisAddr = this.address();
+
+    const l = [];
+
+    if (thisAddr) {
+      l.push(thisAddr.toString());
+    }
+
+    return l;
   }
 
   private createListenerApplication():Application {
@@ -237,18 +391,43 @@ export class WebEventEmitter extends EventEmitter {
 
     });
 
-    router.post('/:eventName', (ctx) => {
-      if (this.emit)
+    /**
+     * For emitting an event. The POST body must conform to the structure of
+     * the IWebHookEvent interface.
+     */
+    router.post('/emit', (ctx) => {
+      const data = ctx.request.body;
+      if (isIWebHookEvent(data)) {
+        ctx.status = 200;
+        ctx.body = {
+          status: 'OKAY',
+          message: 'We good, homes.',
+        };
+      } else {
+        ctx.status = statusCodes.BAD_REQUEST;
+        ctx.body = {
+          status: 'ERROR',
+          message: 'POST body was badly formatted.',
+        };
+      }
     });
 
-    router.get('/status', (ctx) => {
+    router.get('/status', async (ctx) => {
+      const status:IStatusResponse = {
+        nodeStatus: await this.serverStatus(),
+        networkStatus: await this.networkStatus(),
+        servers: await this.serverList(),
+        eventNames: [], // TODO: Fill out!
+      };
 
+      ctx.status = 200;
+      ctx.body = status;
     });
 
     router.get('/event-names', (ctx) => {
       ctx.body = {
         status: 'OK',
-        eventNames: this.localEventNames(),
+        eventNames: this.eventNames(),
       }
     })
 
