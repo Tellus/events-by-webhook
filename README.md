@@ -87,7 +87,36 @@ while LEAF should repeatedly print
 CENTRAL sent an event.
 ```
 
-### Replacing EventEmitter.
+### An important note regarding Symbols
+
+Symbols were introduced in ES6 and allows you to create guaranteed unique identifiers. Symbols support the notion of a registry where you can look up and use a Symbol across an entire application process. *For this specific purpose, Symbols cannot be used between processes*, and for the same reason, they cannot be transferred over the web and perfectly retain their meaning.
+
+When adding listeners or emitting events named by Symbol (and not a string), locally, WebEventEmitter will treat them as-is. It will not modify Symbols that you use. When receiving Symbols from other emitters, however, their string value is used to retrieve (or create) a Symbol in the local process' registry. For this reason, it is recommended that you use the registry for your symbols if you use them for events.
+
+An example between two WebEventEmitters. We're skipping configuration for sake of brevity, but assume that the two emitters are running in two different processes.
+
+```typescript
+// In process A
+const alice = new WebEventEmitter(...);
+// In process B
+const bob = new WebEventEmitter(...);
+
+// Add an event listener for the event identified uniquely by Symbol('clark').
+alice.on(Symbol('clark'), () => { /* Do something */ });
+
+// Emit an event unique identified by Symbol('clark').
+bob.emit(Symbol('clark'))
+```
+
+`alice` will probably not fire on the event because the unique identifier given by the local Symbol('clark') is quite possibly *different* from the unique identifier given by Symbol('clark') on process B. To mitigate this, WebEventEmitter will always use the registry to retrieve a symbol for a value when receiving an *external* event emission. Instead, do this:
+
+```typescript
+alice.on(Symbol.for('clark'), () => { /* Do something */ });
+```
+
+When emitting the event `Symbol('clark')` across the network, it is serialized as "Symbol(clark)" and deserialized using `Symbol.for('clark')`. Thus, a receiving WebEventEmitter will always get a symbol from the registry when a Symbol event is received. For ease of use, it's recommened you use `Symbol.for()` whenever possible when using Symbols to identify events.
+
+### Replacing EventEmitter
 
 `WebEventEmitter` can be used as a drop-in replacement of `EventEmitter`. Only the initialization and active destruction (call to `WebEventEmitter.close()`) differ.
 

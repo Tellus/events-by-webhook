@@ -91,6 +91,14 @@ export interface IWebHookEvent {
   args: any;
 }
 
+export interface IWebEmitResponse {
+  status: 'ok' | 'error',
+  reason?: string,
+  listenerCount: number,
+  event: string,
+  symbol: boolean,
+}
+
 type NodeStatus = 'STARTING' | 'RUNNING' | 'CLOSING' | 'ERROR';
 type NetworkStatus = 'HEALTHY' | 'DOWN' | 'PARTIAL';
 
@@ -133,6 +141,10 @@ export function isIWebHookEvent(obj:any): obj is IWebHookEvent {
       && (cons.args == undefined || typeof cons.args == 'object');
 }
 
+export function isSymbol(obj:string | symbol): obj is symbol {
+  return _.hasIn(obj, 'description');
+}
+
 /**
  * Returns true if the passed object is a Plain Old Javascript Object, fit for
  * transmission over the network.
@@ -152,6 +164,17 @@ function stringToSymbolOrString(value:string): string | symbol {
     // Assume proper symbol. Coerce.
     return Symbol.for(value.slice(7, value.length - 1));
   } else return value;
+}
+
+/**
+ * For some reason, TypeScript doesn't know of the "description" instance
+ * property of Symbol. This function just pulls it out from toString() instead.
+ * @param value The symbol to drag a string out of.
+ */
+function symbolToString(value:symbol): string {
+  const str = value.toString();
+
+  return str.slice(7, str.length - 1);
 }
 
 /**
@@ -271,14 +294,20 @@ export class WebEventEmitter extends EventEmitter {
   }
 
   /**
-   * 
+   * Fires an event. The event *will* be propagated to other servers, but the
+   * return value only reflects whether there were any *local* listeners. Pass
+   * a callback to be notified once the event has been propagated fully that
+   * can tell if whether the other emitters had any listeners.
+   * @see globalEmit for a Promise-based version of this function.
    * @param event The event to trigger.
+   * @param remoteCallback If set, will be called once all other emitters have
+   * fired their events locally.
    * @param args Arguments to pass to listeners. NOTE! While local (in-process)
    * listeners can work with any sort of reference it is passed, remote
    * listeners can't. To avoid problems, only use POJOs as arguments - pure
    * data, all the way down. 
    */
-  emit(event: string | symbol, ... args: any[]): boolean {
+  emit(event: string | symbol, onPropagated?:(err: any, hadListeners:boolean) => void, ... args: any[]): boolean {
     if (!isPOJO({ ... args }))
       throw new Error('Some of the event data can not be serialized. Propagation halted.');
 
@@ -302,17 +331,61 @@ export class WebEventEmitter extends EventEmitter {
   }
 
   /**
-   * 
-   * @param event The event to propagate. If a symbol, will be co-erced to a
-   * string before transmission.
-   * @param args Event arguments.
+   * Fires an event to all *local* listeners and returns a value signaling
+   * whether there were any listeners for this particular event.
+   * @param event The event to fire.
+   * @param args Any arguments to pass to any listeners.
    */
-  private async propagateEvent(event: string | symbol, ...args: any[]):Promise<boolean> {
-    const result = await this.$http.post(`/${event.toString()}`, {
-      ... args
-    });
+  localEmit(event: string | symbol, ... args: any[]): boolean {
+    return super.emit(event, ... args);
+  }
 
-    return result.data.hadListeners;
+  /**
+   * Fires an event locally AND to known WebEventEmitters.
+   * @param event The event to fire.
+   * @param args Any arguments to be passed along to listeners.
+   */
+  async globalEmit(event: string | symbol, ... args: any[]): Promise<boolean> {
+    const hadLocalListeners = this.localEmit(event, ... args);
+
+    // Fire up a promise for each separate server, then wait for them all to finish.
+    const hadListenerCollection:boolean[] = await Promise.all<boolean>(_.map(
+      await this.serverList(),
+      (value) => {
+        return this.remoteEmit(value, event, ... args);
+      },
+    ));
+
+    // Reduce them all to a single boolean with the OR operator.
+    const hadAnyListeners:boolean = _.reduce(hadListenerCollection,
+      (acc, val) => {
+        return acc || val;
+      }, hadLocalListeners
+    );
+
+    // And return a trivial promise.
+    return Promise.resolve<boolean>(hadAnyListeners);
+  }
+
+  /**
+   * Asynchronously fires an event at a single remote server.
+   * @param server The fully-qualified URL of the receiving WebEventEmitter.
+   * @param event The event to fire.
+   * @param args Any data to send along.
+   */
+  private async remoteEmit(server:string, event: string | symbol, ... args: any[]): Promise<boolean> {
+    const weData:IWebHookEvent = {
+      event: isSymbol(event) ? symbolToString(event) : event,
+      symbol: isSymbol(event),
+      args: args,
+    }
+
+    const result:IWebEmitResponse = await this.$http.post('/emit', weData);
+
+    return new Promise<boolean>((resolve, reject) => {
+      if (result.status == 'ok') resolve(result.listenerCount > 0);
+      else reject(result.reason)
+    });
   }
 
   // Called internally when receiving events via the endpoint. 
@@ -322,20 +395,21 @@ export class WebEventEmitter extends EventEmitter {
   }
 
   /**
-   * Returns an array listing the events for which the emitter has registered
-   * listeners. The values in the array will be strings or Symbols.
-   * This function differs from the normal EventEmitter, as it will also return
-   * the event names with listeners from other emitters in the network.
+   * Queries the other WebEventEmitters and returns a collection of unique
+   * event names.
    */
-  eventNames(): Array<string | symbol> {
-    const localEventNames = super.eventNames();
+  // TODO: IMPLEMENT.
+  // async remoteEventNames(): Promise<(string | symbol)[]> {
+  //   const servers = await this.serverList();
 
-    // Collect event names from central server.
-    throw new Error('Not yet implemented. Cannot await HTTP request.');
-    //const result = await this.$http.get('/event-names');
+  //   const eventNames:Set<string | symbol>;
 
-    // return localEventNames.concat(result.data.eventNames);
-  }
+
+
+  //   servers.forEach((server) => {
+
+  //   });
+  // }
 
   async serverStatus():Promise<NodeStatus> {
     // TODO: Implement an actual health check.
