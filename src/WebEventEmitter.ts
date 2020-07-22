@@ -426,8 +426,17 @@ export class WebEventEmitter extends EventEmitter {
    * TODO: Is this the value we're looking for, really?
    * TODO: Can we simplify the return type? Like ReturnType<Server.address>
    */
-  address(): string | AddressInfo | null | undefined {
-    return this.koaServer?.address();
+  address(): string {
+    console.debug('Address requested:');
+    if (this.koaServer) {
+      const addr = this.koaServer.address();
+
+      console.debug(addr);
+      if (addr != null && addr != undefined) {
+        if (typeof addr == 'string') return addr;
+        else return `http://${addr.address}:${addr.port}`;
+      } else throw Error('Very bad error! koaServer defined but no address was returned!');
+    } else throw new Error('HttpServer is not running.');
   }
 
   async serverList():Promise<string[]> {
