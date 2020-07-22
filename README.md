@@ -147,3 +147,7 @@ It's impossible to set up ZeroConf on solutions running on the internet, but for
 #### Distributed event propagation
 
 Having central nodes propagate all events is a clear bottleneck. If the propagation task is distributed evenly throughout, propagation capacity increases markedly.
+
+#### Websockets for servers without addresses
+
+For servers without an externally accessible endpoint, websockets would allow those servers to access servers *with* endpoints, allowing two-way communication. There are other solutions to this, but websockets would re-use the Http transports that are already in use.
