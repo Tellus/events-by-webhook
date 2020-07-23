@@ -1,4 +1,5 @@
 import { IWebHookEvent } from './IWebHookEvent';
+import { IBaseWebEventEmitterResponse } from './IBaseWebEventEmitterResponse';
 
 export type NodeStatus = 'STARTING' | 'RUNNING' | 'CLOSING' | 'ERROR';
 export type NetworkStatus = 'HEALTHY' | 'DOWN' | 'PARTIAL';
@@ -6,7 +7,7 @@ export type NetworkStatus = 'HEALTHY' | 'DOWN' | 'PARTIAL';
 /**
  * Structure required when responding to a /status GET request.
  */
-export interface IWebStatusResponse {
+export interface IWebStatusResponse extends IBaseWebEventEmitterResponse {
   /**
    * Current status of the specific emitter that was contacted.
    */

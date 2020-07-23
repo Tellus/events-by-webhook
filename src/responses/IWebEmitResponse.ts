@@ -1,7 +1,7 @@
-export interface IWebEmitResponse {
-  status: 'ok' | 'error',
-  reason?: string,
-  listenerCount: number,
-  event: string,
-  symbol: boolean,
+import { IBaseWebEventEmitterResponse } from './IBaseWebEventEmitterResponse';
+
+export interface IWebEmitResponse extends IBaseWebEventEmitterResponse {
+  hadListeners: boolean;
+  event: string;
+  symbol: boolean;
 }

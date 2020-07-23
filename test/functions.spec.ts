@@ -1,8 +1,8 @@
 'use strict';
 
-import mocha from 'mocha';
+import 'mocha';
 import { expect } from 'chai';
-import { IWebHookEvent, isIWebHookEvent } from '../src/WebEventEmitter';
+import { isIWebHookEvent } from '../src/Util';
 
 describe('isIWebHookEvent', () => {
   // Shorthand functions. We use this structure so often we might as well shorten it.

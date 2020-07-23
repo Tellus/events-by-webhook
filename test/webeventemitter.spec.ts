@@ -1,21 +1,18 @@
-import mocha from 'mocha';
-import { expect } from 'chai';
-import { WebEventEmitter, IWebEventEmitterOptions } from '../src/WebEventEmitter';
+import { expect, assert } from 'chai';
+import { WebEventEmitter } from '../src/WebEventEmitter';
 import { IWebStatusResponse } from '../src/responses';
-import Axios from 'axios';
-import { createServer } from 'http';
-import { AddressInfo } from 'net';
+import got from 'got';
 
 describe('WebEventEmitter', () => {
   let emitter:WebEventEmitter;
-  // Used to increment ports used. Should avoid some port clashes.
-  var portCounter:number = 10000;
+
+  function addressFail(): void {
+    return assert.fail('Address MUST be defined in this test case. Something is wrong.');
+  }
 
   function createEmitter():WebEventEmitter {
     return new WebEventEmitter({
-      host: 'localhost',
-      port: ++portCounter,
-      baseUrl: `http://localhost:${portCounter}/`,
+      
     });
   }
 
@@ -25,10 +22,15 @@ describe('WebEventEmitter', () => {
 
   afterEach(async () => {
     try {
-      await emitter?.dispose();
+      // TODO: Re-enable!!!
+      // await emitter?.dispose();
     } finally {
       /* OK */
     }
+  });
+
+  after(() => {
+    console.debug('ALL TESTS DONE');
   });
 
   it('Should correctly emit an event locally', () => {
@@ -48,18 +50,22 @@ describe('WebEventEmitter', () => {
       port: port,
     });
     const actAddress = (await e.listen()).address();
+    // Should always yield an address when actively listening.
 
-    // TODO: Use a better assertion.
-    var threw = false;
+    expect(actAddress).to.exist;
+    if (actAddress) {
+      // TODO: Use a better assertion.
+      var threw = false;
 
-    try {
-      await Axios.get(actAddress);
+      try {
+        await got.get(actAddress);
 
-      expect(threw).to.be.false;
-    } catch (err) {
-      threw = true;
-    } finally {
-      await e.dispose();
+        expect(threw).to.be.false;
+      } catch (err) {
+        threw = true;
+      } finally {
+        await e.dispose();
+      }
     }
   });
 
@@ -73,10 +79,12 @@ describe('WebEventEmitter', () => {
     });
 
     const addr = (await e.listen()).address();
+    if (!addr) return addressFail();
+    
     var threw = false;
 
     try {
-      await Axios.get(addr);
+      await got.get(addr);
 
       expect(threw).to.be.false;
     } catch (err) {
@@ -98,6 +106,7 @@ describe('WebEventEmitter', () => {
     });
 
     const addr = (await e.listen()).address();
+    if (!addr) return addressFail();
 
     expect(typeof addr).to.equal('string');
     expect(addr).to.equal(_baseUrl);
@@ -105,7 +114,7 @@ describe('WebEventEmitter', () => {
     var threw = false;
 
     try {
-      await Axios.get(addr);
+      await got.get(addr);
 
       expect(threw).to.be.false;
     } catch (err) {
@@ -122,28 +131,25 @@ describe('WebEventEmitter', () => {
 
     //console.debug(`Attempting to connect to emitter at ${addr}`);
 
-    const statusResult:IWebStatusResponse = (await Axios.get(addr)).data;
+    const statusResult:IWebStatusResponse = await got.get(addr).json<IWebStatusResponse>();
 
     expect(statusResult.nodeStatus).to.equal('RUNNING');
   });
 
   it('Should connect to a different emitter and report its address', async () => {
-    // Re-initialize emitter.
-    await emitter.dispose();
-    emitter = new WebEventEmitter({
-      host: 'localhost',
-      port: 0,
-    });
     await emitter.listen();
 
+    const emitterAddress = emitter.address();
+    if (!emitterAddress) return addressFail();
+
     const bob = new WebEventEmitter({
-      connectTo: emitter.address(),
-      port: ++portCounter,
+      connectTo: emitterAddress,
     });
     await bob.listen();
 
     const servers = await bob.serverList();
 
+    console.debug(servers);
     expect(servers).to.not.be.empty;
     expect(servers.length).to.equal(2); // Local and remote emitter = 2.
     servers.forEach(val => console.debug(val));
@@ -153,18 +159,22 @@ describe('WebEventEmitter', () => {
   });
 
   it('Should emit an event to a connected emitter', async () => {
+    const eventName:string = 'EVENT_MY_EVENT';
+
     await emitter.listen();
+    const address = emitter.address();
+    if (!address) return addressFail();
+
     const bob = new WebEventEmitter({
-      connectTo: emitter.address(),
-      port: ++portCounter,
+      connectTo: address,
     });
     await bob.listen();
 
     var wasEmitted:boolean = false;
 
-    emitter.on('EVENT', () => wasEmitted = true);
+    emitter.on(eventName, () => wasEmitted = true);
 
-    const hadListeners:boolean = await bob.globalEmit('EVENT');
+    const hadListeners:boolean = await bob.globalEmit(eventName);
 
     expect(wasEmitted).to.be.true;
     expect(hadListeners).to.be.true;
@@ -174,9 +184,10 @@ describe('WebEventEmitter', () => {
 
   it('Should receive a remote event', async () => {
     await emitter.listen();
+    const address = emitter.address();
+    if (!address) return addressFail();
     const bob = new WebEventEmitter({
-      connectTo: emitter.address(),
-      port: ++portCounter,
+      connectTo: address,
     });
     await bob.listen();
 

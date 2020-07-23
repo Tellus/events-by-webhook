@@ -4,6 +4,7 @@
 
 import * as _ from 'lodash';
 import { IWebHookEvent, IWebStatusResponse } from './responses';
+import { runInThisContext } from 'vm';
 
  /**
  * Attempts to discern whether obj is a proper IWebHookEvent.
@@ -18,9 +19,13 @@ export function isIWebHookEvent(obj:any): obj is IWebHookEvent {
 }
 
 export function isIWebStatusResponse(obj:any): obj is IWebStatusResponse {
-  const keys = Reflect.ownKeys(obj);
+  const thing = obj as IWebStatusResponse;
 
-  return 'servers' in keys && 'nodeStatus' in keys && 'eventNames' in keys && 'networkStatus' in keys;
+  return thing.success != undefined
+    && thing.nodeStatus != undefined
+    && thing.eventNames != undefined
+    && thing.networkStatus != undefined
+    && thing.servers != undefined;
 }
 
 /**
@@ -32,4 +37,27 @@ export function isPOJO(obj:any):boolean {
   // Implementation is a terse variant of bttmly's is-pojo package.
   if (obj === null || typeof obj !== 'object') return false;
   else return Object.getPrototypeOf(obj) === Object.prototype;
+}
+
+/**
+ * If value seems to be a Symbol (i.e. "Symbol(someWord)"), function will return
+ * a proper Symbol. Otherwise, the value is returned as-is.
+ * @param value The string to parse.
+ */
+export function stringToSymbolOrString(value:string): string | symbol {
+  if (value.startsWith('Symbol(') && value.endsWith(')')) {
+    // Assume proper symbol. Coerce.
+    return Symbol.for(value.slice(7, value.length - 1));
+  } else return value;
+}
+
+/**
+ * For some reason, TypeScript doesn't know of the "description" instance
+ * property of Symbol. This function just pulls it out from toString() instead.
+ * @param value The symbol to drag a string out of.
+ */
+export function symbolToString(value:symbol): string {
+  const str = value.toString();
+
+  return str.slice(7, str.length - 1);
 }

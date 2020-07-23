@@ -18,5 +18,5 @@ export interface IWebHookEvent {
    * The event arguments. Since this entire structure must be JSON-encoded,
    * arguments can't contain functions or complex objects.
    */
-  args: any;
+  args?: any;
 }

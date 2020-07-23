@@ -8,15 +8,16 @@ import bodyparser from 'koa-bodyparser';
 import Application from 'koa';
 import Router from '@koa/router';
 import koaJwt from 'koa-jwt';
-import axios, { AxiosError } from 'axios';
-import WebEventEmitterClient from './WebEventEmitterClient';
+import got, { Got } from 'got';
+import { WebEventEmitterClient } from './WebEventEmitterClient';
 
 import * as statusCodes from 'http-status-codes';
 import { AddressInfo } from 'net';
 
 import * as os from 'os';
-import { isPOJO, isIWebHookEvent } from './Util';
+import { isPOJO, isIWebHookEvent, symbolToString, stringToSymbolOrString } from './Util';
 import { IWebHookEvent, IWebEmitResponse, NodeStatus, NetworkStatus, IWebStatusResponse } from './responses';
+import { IWebEventNamesResponse } from './responses/IWebEventNamesResponse';
 
 export interface IWebEventEmitterOptions {
   /**
@@ -51,29 +52,6 @@ export interface IWebEventEmitterOptions {
 }
 
 /**
- * If value seems to be a Symbol (i.e. "Symbol(someWord)"), function will return
- * a proper Symbol. Otherwise, the value is returned as-is.
- * @param value The string to parse.
- */
-function stringToSymbolOrString(value:string): string | symbol {
-  if (value.startsWith('Symbol(') && value.endsWith(')')) {
-    // Assume proper symbol. Coerce.
-    return Symbol.for(value.slice(7, value.length - 1));
-  } else return value;
-}
-
-/**
- * For some reason, TypeScript doesn't know of the "description" instance
- * property of Symbol. This function just pulls it out from toString() instead.
- * @param value The symbol to drag a string out of.
- */
-function symbolToString(value:symbol): string {
-  const str = value.toString();
-
-  return str.slice(7, str.length - 1);
-}
-
-/**
  * These are the "true" default options. We keep these around in case someone
  * accidentally assigns a partial object to httpServer or other nested objects.
  */
@@ -97,7 +75,7 @@ export class WebEventEmitter extends EventEmitter {
   /**
    * Private reference to axios.
    */
-  private $http = axios;
+  private $http:Got;
 
   /**
    * Heartbeat interval. At every tick, the emitter checks the rest of the
@@ -105,14 +83,15 @@ export class WebEventEmitter extends EventEmitter {
    */
   private keepaliveTimer:ReturnType<typeof setInterval>;
 
+  /**
+   * Options object for this emitter instance. Read-only.
+   */
   readonly options: Readonly<IWebEventEmitterOptions>;
 
   /**
-   * True if options.port is zero, false otherwise. This variable is used on
-   * calls to listen() to figure out whether to use the actual value of 
-   * options.port or pass 0 (randomize) to the listen function.
+   * Most recent list of known event emitters.
    */
-  private randomizePort:boolean;
+  private cachedServerList:string[] = [];
 
   /**
    * Default options used for the emitters. Changing these will only have an
@@ -136,36 +115,59 @@ export class WebEventEmitter extends EventEmitter {
       ... options,
     };
 
-    this.randomizePort = this.options.port == 0;
-
-    this.koaApplication = this.createListenerApplication();
-    
-    if (this.options.connectTo) {
-      this.$http.defaults = {
-        baseURL: options?.connectTo
-      }
-    } else {
-      // Warning! We're NOT connected anywhere!
+    if (options?.connectTo) {
+      this.cachedServerList = [ options.connectTo ];
     }
 
+    this.koaApplication = this.createListenerApplication();
+
+    this.$http = got.extend({
+      // Any got options?
+      retry: 3,
+      timeout: 1000,
+      throwHttpErrors: true,
+    });
+
     // TODO: Is there a way to do this assignment without casting to "any" first?
-    this.keepaliveTimer = <any>setInterval(() => console.debug('Checking network health.'), this.options.keepaliveInterval);
+    this.keepaliveTimer = <any>setInterval(() => console.debug(`${this.address()}: Checking network health.`), this.options.keepaliveInterval);
+
+    // Force initial sync.
+    this.networkSync();
   }
 
   /**
    * Performs a health check, by syncing with known servers.
    */
   private async networkSync(): Promise<void> {
+    
     const oldServers = (await this.serverList()).map(serverUrl => new WebEventEmitterClient(serverUrl));
-    var newServers:string[] = [];
+    var newServers:Set<string> = new Set();
 
     oldServers.forEach(async (server) => {
       // Is server alive?
-      if (!await server.isAlive()) return;
+      if (await server.isAlive()) {
+        // If yes, keep.
+        newServers.add(server.baseUrl);
 
-      // If yes, register.
-      newServers.push(server.baseUrl);
+        // Grab that servers known friends.
+        (await server.serverNames()).forEach(srv => newServers.add(srv));
+      } else {
+        console.warn(`SYNC: Server ${server.baseUrl} did not respond. Removing from live list.`);
+      }
     });
+
+    this.cachedServerList = Array.from(newServers);
+
+    console.debug(`${this.address()}: Network sync. Had ${oldServers.length} servers. Now has ${newServers.size} servers.`);
+  }
+
+  /**
+   * If the internal webserver is currently listening on a port, that port
+   * number is returned. Otherwise, nothing.
+   */
+  get port(): number | undefined {
+    if (this.koaServer && this.koaServer.listening) return (<AddressInfo>this.koaServer.address()).port;
+    else return undefined;
   }
 
   /**
@@ -185,7 +187,7 @@ export class WebEventEmitter extends EventEmitter {
 
         // HttpServer#listen is asynchronous. The callback ensures resolve.
         this.koaServer = this.koaApplication.listen({
-            port: this.randomizePort ? 0 : this.options.port,
+            port: this.options.port,
             hostname: this.options.host,
           },
           () => {
@@ -276,18 +278,24 @@ export class WebEventEmitter extends EventEmitter {
     const hadLocalListeners = this.localEmit(event, ... args);
 
     // Fire up a promise for each separate server, then wait for them all to finish.
-    const hadListenerCollection:boolean[] = await Promise.all<boolean>(_.map(
+    
+    const hadListenerCollection:boolean[] = await Promise.all(_.map(
       await this.serverList(),
-      (value) => {
-        return this.remoteEmit(value, event, ... args);
-      },
+      (value) => this.remoteEmit(value, event, ... args)
+        .then(hadListeners => {
+          console.debug(`Successfully emitted to ${value}`);
+          return hadListeners;
+        })
+        .catch(err => {
+          console.error(`Failed to emit to ${value}`);
+          return false;
+        }),
     ));
 
     // Reduce them all to a single boolean with the OR operator.
     const hadAnyListeners:boolean = _.reduce(hadListenerCollection,
-      (acc, val) => {
-        return acc || val;
-      }, hadLocalListeners
+      (acc, val) => acc || val,
+      hadLocalListeners
     );
 
     // And return a trivial promise.
@@ -301,18 +309,9 @@ export class WebEventEmitter extends EventEmitter {
    * @param args Any data to send along.
    */
   private async remoteEmit(server:string, event: string | symbol, ... args: any[]): Promise<boolean> {
-    const weData:IWebHookEvent = {
-      event: typeof event === 'symbol' ? symbolToString(event) : event,
-      symbol: typeof event === 'symbol',
-      args: args,
-    }
+    const client = new WebEventEmitterClient(server);
 
-    const result:IWebEmitResponse = await this.$http.post('/emit', weData);
-
-    return new Promise<boolean>((resolve, reject) => {
-      if (result.status == 'ok') resolve(result.listenerCount > 0);
-      else reject(result.reason)
-    });
+    return await client.emit(event, ... args);
   }
 
   // Called internally when receiving events via the endpoint. 
@@ -320,23 +319,6 @@ export class WebEventEmitter extends EventEmitter {
     // Local event emission.
     return super.emit(stringToSymbolOrString(eventName), args);
   }
-
-  /**
-   * Queries the other WebEventEmitters and returns a collection of unique
-   * event names.
-   */
-  // TODO: IMPLEMENT.
-  // async remoteEventNames(): Promise<(string | symbol)[]> {
-  //   const servers = await this.serverList();
-
-  //   const eventNames:Set<string | symbol>;
-
-
-
-  //   servers.forEach((server) => {
-
-  //   });
-  // }
 
   async serverStatus():Promise<NodeStatus> {
     // TODO: Implement an actual health check.
@@ -353,14 +335,12 @@ export class WebEventEmitter extends EventEmitter {
    * TODO: Is this the value we're looking for, really?
    * TODO: Can we simplify the return type? Like ReturnType<Server.address>
    */
-  address(): string {
+  address(forceIPv4:boolean = true): string | null {
     // Bail if no defined server.
-    if (!this.koaServer)
-      throw new Error('HttpServer is not running.');
+    if (!this.koaServer) return null;
 
     // Bail if server isn't listening.
-    if (!this.koaServer.listening)
-      throw new Error('HttpServer defined but not running!');
+    if (!this.koaServer.listening) return null;
   
     // Returns baseUrl as-is if defined.
     if (this.options.baseUrl)
@@ -386,21 +366,27 @@ export class WebEventEmitter extends EventEmitter {
     const httpServerAddr = this.koaServer.address() as AddressInfo;
 
     // Final interface. First external interface that has same family as reported by HttpServer.
-    const netInterface = networkCandidates.find(ifs => ifs.family == httpServerAddr.family);
+    const netInterface = networkCandidates.find(ifs => ifs.family == (forceIPv4 ? 'IPv4' : httpServerAddr.family));
 
-    if (httpServerAddr.family == 'IPv6') {
-      return `http://[${netInterface?.address}]:${httpServerAddr.port}/`;
-    } else {
-      return `http://${netInterface?.address}:${httpServerAddr.port}/`;
-    }
+    if (netInterface) {
+      if (netInterface.family == 'IPv6') {
+        return `http://[${netInterface.address}]:${httpServerAddr.port}/`;
+      } else {
+        return `http://${netInterface.address}:${httpServerAddr.port}/`;
+      }
+    } else return null;
   }
 
   async serverList():Promise<string[]> {
-    const l = [ this.address() ];
+    const serverSet:Set<string> = new Set();
+    
+    const address = this.address();
+    if (address)
+      serverSet.add(address);
 
-    console.error('Missing serverList() implementation!');
+    this.cachedServerList.forEach(srv => serverSet.add(srv));
 
-    return l;
+    return Array.from(serverSet);
   }
 
   private createListenerApplication():Application {
@@ -438,9 +424,9 @@ export class WebEventEmitter extends EventEmitter {
       const data = ctx.request.body;
       if (isIWebHookEvent(data)) {
         ctx.status = 200;
-        ctx.body = {
-          status: 'OKAY',
-          message: 'We good, homes.',
+        ctx.body = <IWebEmitResponse>{
+          success: true,
+          hadListeners: this.localEmit(data.symbol ? stringToSymbolOrString(data.event) : data.event, data.args),
         };
       } else {
         ctx.status = statusCodes.BAD_REQUEST;
@@ -452,21 +438,21 @@ export class WebEventEmitter extends EventEmitter {
     });
 
     router.get('/status', async (ctx) => {
-      const status:IWebStatusResponse = {
+      ctx.status = 200;
+      ctx.body = <IWebStatusResponse>{
+        success: true,
         nodeStatus: await this.serverStatus(),
         networkStatus: await this.networkStatus(),
         servers: await this.serverList(),
         eventNames: [], // TODO: Fill out!
       };
-
-      ctx.status = 200;
-      ctx.body = status;
     });
 
     router.get('/event-names', (ctx) => {
-      ctx.body = {
-        status: 'OK',
-        eventNames: this.eventNames(),
+      ctx.status = 200;
+      ctx.body = <IWebEventNamesResponse>{
+        success: true,
+        events: this.eventNames(),
       }
     })
 

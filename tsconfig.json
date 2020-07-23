@@ -2,8 +2,11 @@
   "compilerOptions": {
     "sourceMap": true,
     "target": "es6",
+    "outDir": "dist",
     "strict": true,
-
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "module": "commonjs",
@@ -15,5 +18,5 @@
   },
   "exclude": [
     "node_modules"
-  ]
+  ],
 }
