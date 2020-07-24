@@ -31,12 +31,18 @@ export function isIWebStatusResponse(obj:any): obj is IWebStatusResponse {
 /**
  * Returns true if the passed object is a Plain Old Javascript Object, fit for
  * transmission over the network.
+ * The initial implementation was inspired by the is-pojo package but differs
+ * significantly to our needs.
+ * TODO: Recursion!
  * @param obj Object to test.
  */
 export function isPOJO(obj:any):boolean {
-  // Implementation is a terse variant of bttmly's is-pojo package.
+  // Base test.
   if (obj === null || typeof obj !== 'object') return false;
-  else return Object.getPrototypeOf(obj) === Object.prototype;
+  // Make sure that there are no functions.
+  if (_.valuesIn(obj).some(value => typeof value === 'function')) return false;
+  // Otherwise, return final test.  
+  return Object.getPrototypeOf(obj) === Object.prototype;
 }
 
 /**

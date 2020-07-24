@@ -11,22 +11,27 @@ describe('WebEventEmitterClient', () => {
   }
 
   beforeEach(async () => {
-    emitter = new WebEventEmitter({
+    emitter = await WebEventEmitter.Create({
+      name: '(UNIT TEST - Client) Base Emitter',
       port: 0,
     });
 
-    await emitter.listen();
-
-    console.debug(`Test emitter should be listening on ${emitter.address()}.`);
+    //console.debug(`Test emitter should be listening on ${emitter.address()}.`);
     const address = emitter.address();
     if (!address) return addressFail();
 
     client = new WebEventEmitterClient(address);
+    process.prependOnceListener('uncaughtException', killEmitter);
   });
 
   afterEach(async () => {
-    emitter.dispose();
+    await killEmitter();
+    process.removeListener('uncaughtException', killEmitter);
   });
+
+  async function killEmitter():Promise<void> {
+    await emitter.dispose();
+  }
 
   it('Should correctly report isAlive for a live server', async () => {
     expect(await client.isAlive()).to.be.true;
@@ -37,9 +42,32 @@ describe('WebEventEmitterClient', () => {
     expect(await client.isAlive()).to.be.false;
   });
 
+  it('Should correctly report isAlive for consecutive calls', async () => {
+    expect(await client.isAlive()).to.be.true;
+    expect(await client.isAlive()).to.be.true;
+    expect(await client.isAlive()).to.be.true;
+  });
+
+  it('Should correctly respond when more than one emitter exists in the process', async () => {
+    const emitter2 = await WebEventEmitter.Create({
+      name: '(UNIT TEST - Client) Ensure isAlive with multiple emitters',
+      port: 0
+    });
+    const address = emitter2.address();
+    if (!address) return addressFail();
+    
+    const client2 = new WebEventEmitterClient(address);
+
+    expect(await client.isAlive()).to.be.true;
+    expect(await client2.isAlive()).to.be.true;
+    expect(await client.isAlive()).to.be.true;
+
+    await emitter2.dispose();
+  });
+
   it('Should correctly report events with listeners', async () => {
     const listen1 = () => {};
-    const listen2 = () => { console.debug('NOOP'); }
+    const listen2 = () => { /* no-op */ };
 
     const event1 = 'nothing';
     const event2 = 'bupkiss';
@@ -66,21 +94,24 @@ describe('WebEventEmitterClient', () => {
     expect(wasTriggered).to.be.true;
   });
 
+  // TODO: This test fails (GOOD!) because the known servers aren't reciprocal.
+  // emitter2 knows about emitter1 but NOT the other way around, and its the
+  // latter case we're testing. Fix the code.
   it('Should correctly report its known servers', async () => {
     const address1 = emitter.address();
     if (!address1) return addressFail();
-    const emitter2:WebEventEmitter = new WebEventEmitter({
+    const emitter2:WebEventEmitter = await WebEventEmitter.Create({
+      name: '(UNIT TEST - Client) Report known servers',
       port: 0,
       connectTo: address1,
     });
-    await emitter2.listen();
     const address2 = emitter2.address();
     if (!address2) return addressFail();
 
     const servers = await client.serverNames();
 
     expect(servers).to.not.be.empty;
-    expect(servers.indexOf(address1)).to.be.gte(0);
-    expect(servers.indexOf(address2)).to.be.gte(0);
+    expect(servers).to.contain(address1);
+    expect(servers).to.contain(address2);
   });
 });

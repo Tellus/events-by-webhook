@@ -49,11 +49,27 @@ export interface IWebEventEmitterOptions {
   host?: string;
 
   baseUrl?: string;
+
+  /**
+   * Optional name for the emitter. Useful in debugging and will be used if
+   * logging is enabled.
+   */
+  name?: string;
+
+  /**
+   * Optional description for the emitter. Can be useful in debugging.
+   */
+  description?: string;
+  
+  /**
+   * Be verbose in stdout?
+   */
+  verbose?: boolean;
 }
 
 /**
  * These are the "true" default options. We keep these around in case someone
- * accidentally assigns a partial object to httpServer or other nested objects.
+ * accidentally assigns a partial object to httpServer or other nestedyo objects.
  */
 const defaultEmitterOptions:IWebEventEmitterOptions = {
   captureRejections: false,
@@ -81,7 +97,7 @@ export class WebEventEmitter extends EventEmitter {
    * Heartbeat interval. At every tick, the emitter checks the rest of the
    * network for updates.
    */
-  private keepaliveTimer:ReturnType<typeof setInterval>;
+  private keepaliveTimer:ReturnType<typeof setTimeout>;
 
   /**
    * Options object for this emitter instance. Read-only.
@@ -104,7 +120,7 @@ export class WebEventEmitter extends EventEmitter {
  * events through a webserver endpoint.
  * @param options 
  */
-  constructor(options ?: IWebEventEmitterOptions) {
+  private constructor(options ?: IWebEventEmitterOptions) {
     super({ captureRejections: options?.captureRejections });
 
     // Merge the passed options over the default options, yielding this
@@ -129,36 +145,96 @@ export class WebEventEmitter extends EventEmitter {
     });
 
     // TODO: Is there a way to do this assignment without casting to "any" first?
-    this.keepaliveTimer = <any>setInterval(() => console.debug(`${this.address()}: Checking network health.`), this.options.keepaliveInterval);
+    this.keepaliveTimer = <any>setTimeout(async () => {
+      try {
+        this.log('Checking network health.');
+        await this.networkSync();
+      } catch (err) {
+        this.log(`Failed to perform timed sync! ${err.toString()}`, 'ERROR');
+      } finally {
+        this.keepaliveTimer.refresh();
+      }
+    }, this.options.keepaliveInterval);
+    // Allow the process to exit without being locked to this handler.
+    this.keepaliveTimer.unref();
+  }
 
-    // Force initial sync.
-    this.networkSync();
+  private log(msg:string, type: 'INFO' | 'ERROR' | 'TRACE' | 'LOG' | 'WARN' = 'INFO'):void {
+    if (!this.options.verbose) return;
+
+    const pre = this.options.name ? this.options.name : 'UNNAMED';
+    const toPrint = `[${pre}:${this.address()}]: ${msg}`;
+
+    var printFn:Function;
+
+    switch(type) {
+      case 'ERROR': printFn = console.error; break;
+      case 'INFO': printFn = console.info; break;
+      case 'TRACE': printFn = console.trace; break;
+      case 'LOG': printFn = console.log; break;
+      case 'WARN': printFn = console.warn; break;
+    }
+
+    printFn(toPrint);
+  }
+
+  /**
+   * Creates a new WebEventEmitter and ensures an initial network sync before
+   * returning the instance. This is the preferred method of creating a new
+   * instance, as an exception will be thrown if the instance fails to start
+   * listening or connecting to other emitters.
+   * @param options Options for the new instance.
+   */
+  public static async Create(options ?: IWebEventEmitterOptions): Promise<WebEventEmitter> {
+    const emitter:WebEventEmitter = new WebEventEmitter(options);
+
+    if (options && !options.name) {
+      emitter.log('WebEventEmitter instantiated with no name', 'WARN');
+    }
+
+    try {
+      if (options?.connectTo) {
+        const remote:WebEventEmitterClient = new WebEventEmitterClient(options?.connectTo);
+
+        if (!await remote.isAlive()) throw new Error(`Could not connect to seed emitter at ${options.connectTo}.`);
+
+        // Force a network sync against a single server.
+        await emitter.networkSync(options.connectTo);
+      }
+
+      await emitter.listen();
+      
+      return emitter;
+    } catch (err) {
+      throw new Error(`Failed to create new WebEventEmitter: ${err.toString()}`);
+    }
   }
 
   /**
    * Performs a health check, by syncing with known servers.
    */
-  private async networkSync(): Promise<void> {
+  private async networkSync(server?:string): Promise<void> {
+    const oldServers = server ? [ server ] : this.cachedServerList;
     
-    const oldServers = (await this.serverList()).map(serverUrl => new WebEventEmitterClient(serverUrl));
+    const serverClients = oldServers.map(serverUrl => new WebEventEmitterClient(serverUrl));
     var newServers:Set<string> = new Set();
 
-    oldServers.forEach(async (server) => {
-      // Is server alive?
-      if (await server.isAlive()) {
-        // If yes, keep.
-        newServers.add(server.baseUrl);
-
-        // Grab that servers known friends.
-        (await server.serverNames()).forEach(srv => newServers.add(srv));
-      } else {
-        console.warn(`SYNC: Server ${server.baseUrl} did not respond. Removing from live list.`);
-      }
+    const syncTasks = serverClients.map<Promise<string[]>>(server => {
+      return (async ():Promise<string[]> => {
+        if (await server.isAlive()) {
+          return [ server.baseUrl ].concat(await server.serverNames());
+        } else {
+          this.log(`SYNC: Server ${server.baseUrl} did not respond. Removing from live list.`, 'WARN');
+          return [];
+        }
+      })();
     });
 
-    this.cachedServerList = Array.from(newServers);
+    const newServerLists:string[][] = await Promise.all(syncTasks);
 
-    console.debug(`${this.address()}: Network sync. Had ${oldServers.length} servers. Now has ${newServers.size} servers.`);
+    this.cachedServerList = Array.from(new Set(_.flatten(newServerLists)));
+
+    this.log(`Network sync. Had ${serverClients.length} servers. Now has ${this.cachedServerList.length} servers.`);
   }
 
   /**
@@ -236,25 +312,19 @@ export class WebEventEmitter extends EventEmitter {
    * listeners can't. To avoid problems, only use POJOs as arguments - pure
    * data, all the way down. 
    */
-  emit(event: string | symbol, onPropagated?:(err: any, hadListeners:boolean) => void, ... args: any[]): boolean {
+  emit(event: string | symbol, ... args: any[]): boolean {
     if (!isPOJO({ ... args }))
       throw new Error('Some of the event data can not be serialized. Propagation halted.');
 
-    // Store the local emit result, so we can inform the propagated targets of
+      // Store the local emit result, so we can inform the propagated targets of
     // local event propagation.
-    let hadListeners = super.emit(event, ... args);
+    let hadListeners = this.localEmit(event, ... args);
 
-    try {
-      console.debug(`Propagating event...`);
-      const asJson = JSON.stringify(args);
-    } catch (err) {
-      console.error(`Failed to stringify event payload: ${err}`);
-
-      // OR the current result of hadListeners with the result of propagating
-      // the event, to indicate "any listeners at all"
-      throw new Error('Proper propagation not yet implemented (cannot await).');
-      //hadListeners = hadListeners || await this.propagateEvent(event, args);
-    }
+    // Initiate remote propagation but don't wait for the return value.
+    this.log(`Propagating event...`);
+    this.remoteEmitOnly(event, ... args)
+      .then(hadListeners => this.log(`Finished remote propagation (listeners? ${hadListeners}).`))
+      .catch(err => this.log(`Failed to propagate to remotes: ${err.toString()}.`));
     
     return hadListeners;
   }
@@ -276,30 +346,37 @@ export class WebEventEmitter extends EventEmitter {
    */
   async globalEmit(event: string | symbol, ... args: any[]): Promise<boolean> {
     const hadLocalListeners = this.localEmit(event, ... args);
+    const hadRemoteListeners = await this.remoteEmitOnly(event, ... args);
 
+    return hadLocalListeners || hadRemoteListeners;
+  }
+
+  /**
+   * Emits an event to all remote emitters, but NOT locally.
+   * @param event The event to fire.
+   * @param args Any arguments to be passed along to listeners.
+   */
+  private async remoteEmitOnly(event: string | symbol, ... args: any[]): Promise<boolean> {
     // Fire up a promise for each separate server, then wait for them all to finish.
-    
+
     const hadListenerCollection:boolean[] = await Promise.all(_.map(
       await this.serverList(),
       (value) => this.remoteEmit(value, event, ... args)
         .then(hadListeners => {
-          console.debug(`Successfully emitted to ${value}`);
+          this.log(`Successfully emitted to ${value}`);
           return hadListeners;
         })
         .catch(err => {
-          console.error(`Failed to emit to ${value}`);
+          this.log(`Failed to emit to ${value}`, 'ERROR');
           return false;
         }),
     ));
 
     // Reduce them all to a single boolean with the OR operator.
-    const hadAnyListeners:boolean = _.reduce(hadListenerCollection,
+    return _.reduce<boolean, boolean>(hadListenerCollection,
       (acc, val) => acc || val,
-      hadLocalListeners
+      false
     );
-
-    // And return a trivial promise.
-    return Promise.resolve<boolean>(hadAnyListeners);
   }
 
   /**
@@ -404,7 +481,7 @@ export class WebEventEmitter extends EventEmitter {
 
     // DEBUG-only accses log.
     app.use((ctx, next) => {
-      console.debug(`${new Date().toUTCString()}: ${ctx.method} on '${ctx.url}'`);
+      this.log(`${new Date().toUTCString()}: ${ctx.method} on '${ctx.url}'`);
       return next();
     });
 

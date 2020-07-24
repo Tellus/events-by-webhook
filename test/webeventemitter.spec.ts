@@ -2,6 +2,7 @@ import { expect, assert } from 'chai';
 import { WebEventEmitter } from '../src/WebEventEmitter';
 import { IWebStatusResponse } from '../src/responses';
 import got from 'got';
+import { WebEventEmitterClient } from '../src/WebEventEmitterClient';
 
 describe('WebEventEmitter', () => {
   let emitter:WebEventEmitter;
@@ -10,27 +11,14 @@ describe('WebEventEmitter', () => {
     return assert.fail('Address MUST be defined in this test case. Something is wrong.');
   }
 
-  function createEmitter():WebEventEmitter {
-    return new WebEventEmitter({
-      
+  beforeEach(async () => {
+    emitter = await WebEventEmitter.Create({
+      name: '(UNIT_TEST) Base Emitter',
     });
-  }
-
-  beforeEach(() => {
-    emitter = createEmitter();
   });
 
   afterEach(async () => {
-    try {
-      // TODO: Re-enable!!!
-      // await emitter?.dispose();
-    } finally {
-      /* OK */
-    }
-  });
-
-  after(() => {
-    console.debug('ALL TESTS DONE');
+    await emitter.dispose();
   });
 
   it('Should correctly emit an event locally', () => {
@@ -46,10 +34,12 @@ describe('WebEventEmitter', () => {
   it('Should report an available address (port)', async () => {
     const port = 21942;
     // With nothing set, should return a default-ish HttpServer value.
-    var e:WebEventEmitter = new WebEventEmitter({
+    var e:WebEventEmitter = await WebEventEmitter.Create({
       port: port,
+      name: '(UNIT TEST) Port report test',
     });
-    const actAddress = (await e.listen()).address();
+
+    const actAddress = e.address();
     // Should always yield an address when actively listening.
 
     expect(actAddress).to.exist;
@@ -73,12 +63,13 @@ describe('WebEventEmitter', () => {
     const _host = 'localhost';
     const _port = 25218;
 
-    const e:WebEventEmitter = new WebEventEmitter({
+    const e:WebEventEmitter = await WebEventEmitter.Create({
       host: _host,
       port: _port,
+      name: '(UNIT TEST) Host+port report test',
     });
 
-    const addr = (await e.listen()).address();
+    const addr = e.address();
     if (!addr) return addressFail();
     
     var threw = false;
@@ -99,13 +90,14 @@ describe('WebEventEmitter', () => {
     const _port = 23128; // Should not be reported.
     const _baseUrl = `http://${_host}:${_port}`;
 
-    const e:WebEventEmitter = new WebEventEmitter({
+    const e:WebEventEmitter = await WebEventEmitter.Create({
       host: _host,
       port: _port,
-      baseUrl: _baseUrl
+      baseUrl: _baseUrl,
+      name: '(UNIT TEST) baseUrl report test',
     });
 
-    const addr = (await e.listen()).address();
+    const addr = e.address();
     if (!addr) return addressFail();
 
     expect(typeof addr).to.equal('string');
@@ -125,35 +117,40 @@ describe('WebEventEmitter', () => {
   });
 
   it('Should respond to HTTP requests', async () => {
-    await emitter.listen();
+    const addr = emitter.address();
 
-    const addr = `http://${emitter.options.host}:${emitter.options.port}/status`;
+    if (!addr) return addressFail();
 
-    //console.debug(`Attempting to connect to emitter at ${addr}`);
+    const statusResult:IWebStatusResponse = await got.get(`${addr}status`).json<IWebStatusResponse>();
 
-    const statusResult:IWebStatusResponse = await got.get(addr).json<IWebStatusResponse>();
-
-    expect(statusResult.nodeStatus).to.equal('RUNNING');
+    // Improve test.
+    expect(statusResult.success).to.exist;
   });
 
   it('Should connect to a different emitter and report its address', async () => {
-    await emitter.listen();
-
     const emitterAddress = emitter.address();
     if (!emitterAddress) return addressFail();
+    if (!await new WebEventEmitterClient(emitterAddress).isAlive()) {
+      throw new Error(`Emitter listening but not alive!`);
+    }
 
-    const bob = new WebEventEmitter({
+    const bob = await WebEventEmitter.Create({
       connectTo: emitterAddress,
+      name: '(UNIT TEST) Remote address report test',
     });
-    await bob.listen();
+    const bobAddress = bob.address();
+    if (!bobAddress) return addressFail();
 
     const servers = await bob.serverList();
 
-    console.debug(servers);
+    // Expect the list to be non-null.
     expect(servers).to.not.be.empty;
-    expect(servers.length).to.equal(2); // Local and remote emitter = 2.
-    servers.forEach(val => console.debug(val));
-    expect(servers[0]).to.equal(emitter.address());
+    // Expect it to contain both the local and remote emitter.
+    expect(servers.length).to.equal(2);
+    // Expect the remote emitter to be present in the list.
+    expect(servers).to.contain(emitterAddress);
+    // Expect the local emitter to be present in the list.
+    expect(servers).to.contain(bobAddress);
 
     await bob.dispose();
   });
@@ -161,14 +158,13 @@ describe('WebEventEmitter', () => {
   it('Should emit an event to a connected emitter', async () => {
     const eventName:string = 'EVENT_MY_EVENT';
 
-    await emitter.listen();
     const address = emitter.address();
     if (!address) return addressFail();
 
-    const bob = new WebEventEmitter({
+    const bob = await WebEventEmitter.Create({
       connectTo: address,
+      name: '(UNIT TEST) Remote emit test',
     });
-    await bob.listen();
 
     var wasEmitted:boolean = false;
 
@@ -183,13 +179,15 @@ describe('WebEventEmitter', () => {
   });
 
   it('Should receive a remote event', async () => {
-    await emitter.listen();
     const address = emitter.address();
     if (!address) return addressFail();
-    const bob = new WebEventEmitter({
+    const bob = await WebEventEmitter.Create({
       connectTo: address,
+      name: '(UNIT TEST) Remote receive test',
+      verbose: true,
     });
-    await bob.listen();
+    const bobAddress = await bob.address();
+    if (!bobAddress) return addressFail();
 
     var wasEmitted:boolean = false;
 

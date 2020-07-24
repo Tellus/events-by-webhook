@@ -1,0 +1,6 @@
+{
+  "color": true,
+  "ui": "bdd",
+  "spec": "test/**/*.spec.ts",
+  "require": "ts-node/register"
+}
