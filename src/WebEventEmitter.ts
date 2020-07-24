@@ -514,6 +514,9 @@ export class WebEventEmitter extends EventEmitter {
       }
     });
 
+    /**
+     * For getting the emitter's current status, known servers, and the like.
+     */
     router.get('/status', async (ctx) => {
       ctx.status = 200;
       ctx.body = <IWebStatusResponse>{
@@ -525,6 +528,9 @@ export class WebEventEmitter extends EventEmitter {
       };
     });
 
+    /**
+     * For getting all events that have listeners.
+     */
     router.get('/event-names', (ctx) => {
       ctx.status = 200;
       ctx.body = <IWebEventNamesResponse>{
@@ -532,6 +538,25 @@ export class WebEventEmitter extends EventEmitter {
         events: this.eventNames(),
       }
     })
+
+    /**
+     * For adding a new server to the remote's list. This is for new servers to
+     * "greet" servers they know of.
+     */
+    router.post('/servers', async (ctx) => {
+      if (!this.cachedServerList.includes(ctx.params.baseUrl))
+        this.cachedServerList.push(ctx.params.baseUrl);
+    });
+
+    /**
+     * For removing a server from the remote, prior to shutting down. This also
+     * happens automatically during the network sync, but doing this is cleaner,
+     * for example by avoiding warnings in the log.
+     */
+    router.del('/servers/:id', (ctx) => {
+      if (ctx.params.id in this.cachedServerList)
+        _.remove(this.cachedServerList, ctx.params.id);
+    });
 
     app.use(router.routes());
     app.use(router.allowedMethods());

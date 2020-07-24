@@ -178,6 +178,10 @@ describe('WebEventEmitter', () => {
     await bob.dispose();
   });
 
+  // TODO: This test fails (GOOD!) because we are asking emitter to emit an
+  // event (which it does), but it doesn't know about bob, meaning that the
+  // event is never sent. Implementing reciprocal registration should fix this
+  // test as well as the current issue in WebEventEmitterClient.
   it('Should receive a remote event', async () => {
     const address = emitter.address();
     if (!address) return addressFail();
